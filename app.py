@@ -13,72 +13,62 @@ st.set_page_config(
 
 st.title("📊 Dashboard de Ventas IA")
 
-# 1. Configuración de Conexión a Supabase con Fallback a datos simulados
+# 1. Lectura de Credenciales de Supabase
+def get_supabase_credentials():
+    url = None
+    key = None
+
+    # Intentar obtener de la raíz de st.secrets
+    try:
+        url = st.secrets.get("SUPABASE_URL") or st.secrets.get("supabase_url")
+        key = st.secrets.get("SUPABASE_KEY") or st.secrets.get("supabase_key")
+    except Exception:
+        pass
+
+    # Intentar obtener desde una sección específica [supabase]
+    if not url or not key:
+        try:
+            if "supabase" in st.secrets:
+                sub_sec = st.secrets["supabase"]
+                # En Streamlit, st.secrets["supabase"] puede ser AttrDict o dict
+                if hasattr(sub_sec, "get"):
+                    if not url:
+                        url = sub_sec.get("url") or sub_sec.get("SUPABASE_URL") or sub_sec.get("supabase_url")
+                    if not key:
+                        key = sub_sec.get("key") or sub_sec.get("SUPABASE_KEY") or sub_sec.get("supabase_key")
+                elif isinstance(sub_sec, dict):
+                    if not url:
+                        url = sub_sec.get("url") or sub_sec.get("SUPABASE_URL")
+                    if not key:
+                        key = sub_sec.get("key") or sub_sec.get("SUPABASE_KEY")
+        except Exception:
+            pass
+
+    return url, key
+
+# Intentar obtener las credenciales
+supabase_url, supabase_key = get_supabase_credentials()
+
+# Mostrar error explícito en pantalla si faltan credenciales
+if not supabase_url or not supabase_key:
+    st.error("""
+    ❌ **Error de Configuración**: No se encontraron las credenciales de Supabase en `st.secrets`.
+
+    Por favor, asegúrate de configurar las variables `SUPABASE_URL` y `SUPABASE_KEY` (o dentro de una sección `[supabase]`) en los Secrets de Streamlit.
+    """)
+    st.stop()
+
+# 2. Inicialización del Cliente e Integración de Datos
 @st.cache_resource
-def init_supabase():
+def init_supabase(url, key):
     try:
-        # Intenta obtener credenciales desde st.secrets
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
-    except Exception:
-        # Falla silenciosa para habilitar fallback de desarrollo local
-        return None
+    except Exception as e:
+        st.error(f"❌ **Error al inicializar el cliente de Supabase**: {e}")
+        st.stop()
 
-@st.cache_data
-def generate_mock_data():
-    """Genera un dataset de simulación robusto y realista."""
-    np.random.seed(42)
-    dates = pd.date_range(start="2024-01-01", end="2024-12-31", freq="D")
-
-    regions = ['Norte', 'Sur', 'Centro', 'Este', 'Oeste']
-    channels = ['Online', 'Retail', 'Mayorista', 'Distribuidor']
-    products = ['Producto A', 'Producto B', 'Producto C', 'Producto D', 'Producto E', 'Producto F', 'Producto G']
-
-    num_rows = 1500
-
-    data = {
-        'fecha': pd.to_datetime(np.random.choice(dates, size=num_rows)),
-        'region': np.random.choice(regions, size=num_rows),
-        'canal_venta': np.random.choice(channels, size=num_rows),
-        'producto': np.random.choice(products, size=num_rows, p=[0.3, 0.2, 0.15, 0.15, 0.1, 0.05, 0.05]),
-        'ventas': np.round(np.random.exponential(scale=500, size=num_rows) + np.random.randint(50, 200, size=num_rows), 2),
-        'descuento': np.round(np.random.beta(a=2, b=5, size=num_rows) * 100, 2),
-    }
-
-    df = pd.DataFrame(data)
-    # Generar presupuesto correspondiente, cercano a ventas para comparación visual atractiva
-    df['presupuesto'] = np.round(df['ventas'] * np.random.uniform(0.85, 1.15, size=num_rows), 2)
-
-    return df.sort_values('fecha').reset_index(drop=True)
-
-@st.cache_data
-def load_data():
-    client = init_supabase()
-    if client is None:
-        return generate_mock_data(), False
-
-    try:
-        # Intentar consultar tabla 'ventas'
-        response = client.table("ventas").select("*").execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df = map_columns(df)
-            return df, True
-    except Exception:
-        pass
-
-    try:
-        # Intentar consultar tabla 'sales'
-        response = client.table("sales").select("*").execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df = map_columns(df)
-            return df, True
-    except Exception:
-        pass
-
-    return generate_mock_data(), False
+# Inicialización
+client = init_supabase(supabase_url, supabase_key)
 
 def map_columns(df):
     """Estandariza los nombres de las columnas de la base de datos."""
@@ -98,16 +88,45 @@ def map_columns(df):
         df['fecha'] = pd.to_datetime(df['fecha'])
     return df
 
-# Carga de datos
-df, using_supabase = load_data()
+@st.cache_data
+def load_data_from_supabase():
+    df = None
+    last_error = None
 
-# 2. Barra Lateral (Sidebar) de Filtros
+    # 1. Intentar consultar tabla 'sales'
+    try:
+        response = client.table("sales").select("*").execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df = map_columns(df)
+            return df
+    except Exception as e:
+        last_error = e
+
+    # 2. Intentar consultar tabla 'ventas'
+    try:
+        response = client.table("ventas").select("*").execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df = map_columns(df)
+            return df
+    except Exception as e:
+        last_error = e
+
+    # Si no se pudo obtener de ninguna tabla, mostrar error explícito en pantalla
+    st.error(f"""
+    ❌ **Error de Consulta de Datos**: No se pudo obtener registros de las tablas 'sales' o 'ventas' en Supabase.
+
+    **Detalle del error:** {last_error}
+    """)
+    st.stop()
+
+# Cargar los datos directamente desde PostgreSQL
+df = load_data_from_supabase()
+
+# 3. Barra Lateral (Sidebar) de Filtros (Sin alerta de Fallback)
 st.sidebar.header("Filtros de Datos")
-
-if using_supabase:
-    st.sidebar.success("⚡ Conectado a Supabase")
-else:
-    st.sidebar.info("ℹ️ Usando Datos de Simulación (Fallback)")
+st.sidebar.success("⚡ Conectado a Supabase PostgreSQL")
 
 # Filtro de Rango de Fechas (por defecto abarcando todo el periodo disponible)
 min_date = df['fecha'].min().date()
@@ -161,7 +180,7 @@ def format_currency(value):
 def format_number(value):
     return f"{value:,}"
 
-# 3. Manejo de estados de 0 resultados y visualizaciones
+# 4. Manejo de estados de 0 resultados y visualizaciones
 if filtered_df.empty:
     st.warning("⚠️ No hay resultados disponibles para los filtros seleccionados. Por favor, ajusta los criterios en la barra lateral.")
 
