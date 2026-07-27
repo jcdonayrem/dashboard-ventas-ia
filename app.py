@@ -88,10 +88,12 @@ def flatten_sales(data):
             "fecha": row.get("fecha"),
             "cantidad": row.get("cantidad"),
             "precio_unitario_venta": row.get("precio_unitario_venta"),
-            "descuento": row.get("descuento_aplicado") or 0.0,
-            "ventas": row.get("monto_total") or 0.0,
+            # Forzar conversión de descuento_aplicado a numérico
+            "descuento": float(row.get("descuento_aplicado") or 0.0),
+            "ventas": float(row.get("monto_total") or 0.0),
             "region_id": row.get("region_id"),
             "canal_id": row.get("canal_id"),
+            "promocion_id": row.get("promocion_id"),
             "producto": prod.get("nombre") or "Desconocido",
             "categoria": prod.get("categoria") or "Sin Categoría",
             "canal": chan.get("nombre") or "Desconocido",
@@ -111,7 +113,7 @@ def flatten_budget(data):
             "id": row.get("id"),
             "anio": row.get("anio"),
             "mes": row.get("mes"),
-            "presupuesto": row.get("monto_presupuestado") or 0.0,
+            "presupuesto": float(row.get("monto_presupuestado") or 0.0),
             "region_id": row.get("region_id"),
             "canal_id": row.get("canal_id")
         }
@@ -131,11 +133,11 @@ def load_all_data():
     df_sales = None
     df_budget = None
 
-    # Consulta Principal de Ventas
+    # Consulta Principal de Ventas (incluyendo promocion_id)
     try:
         sales_resp = client.table("ventas").select(
             "id, fecha, cantidad, precio_unitario_venta, descuento_aplicado, monto_total, "
-            "region_id, canal_id, "
+            "region_id, canal_id, promocion_id, "
             "productos(nombre, categoria), "
             "canales(nombre), "
             "regiones(nombre)"
@@ -236,8 +238,17 @@ filtered_budget = df_budget[
     (df_budget['canal'].isin(selected_channels))
 ] if not df_budget.empty else pd.DataFrame(columns=df_budget.columns)
 
-# Formateadores auxiliares para monedas y números
-def format_currency(value):
+# Formateadores auxiliares para monedas y números con abreviaciones
+def format_currency_short(value):
+    """Abrevia cifras grandes para evitar que el texto se corte."""
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:,.2f}M"
+    elif value >= 1_000:
+        return f"${value / 1_000:,.1f}K"
+    else:
+        return f"${value:,.2f}"
+
+def format_currency_full(value):
     return f"${value:,.2f}"
 
 def format_number(value):
@@ -262,25 +273,26 @@ else:
     total_sales = filtered_sales['ventas'].sum()
     total_transactions = len(filtered_sales)
     avg_ticket = filtered_sales['ventas'].mean() if total_transactions > 0 else 0
+    # Asegurando suma del descuento correctamente convertido a float
     total_discounts = filtered_sales['descuento'].sum()
 
-    # Mostrar Tarjetas de KPIs (st.metric)
+    # Mostrar Tarjetas de KPIs con st.metric (Abreviando ventas totales)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Ventas Totales", format_currency(total_sales))
+        st.metric("Ventas Totales", format_currency_short(total_sales), help=format_currency_full(total_sales))
     with col2:
         st.metric("Total de Transacciones", format_number(total_transactions))
     with col3:
-        st.metric("Ticket Promedio", format_currency(avg_ticket))
+        st.metric("Ticket Promedio", format_currency_full(avg_ticket))
     with col4:
-        st.metric("Descuentos Aplicados", format_currency(total_discounts))
+        st.metric("Descuentos Aplicados", format_currency_full(total_discounts))
 
     st.markdown("---")
 
-    # Visualizaciones con Plotly
-    col_left, col_right = st.columns(2)
+    # Layout y Diseño: Cuadrícula de 2 columnas equilibrada
+    row1_left, row1_right = st.columns(2)
 
-    with col_left:
+    with row1_left:
         # Gráfico de Líneas: Tendencia de ventas mensual vs. Presupuesto (Budget)
         sales_monthly = filtered_sales.copy()
         sales_monthly['Mes'] = sales_monthly['fecha'].dt.strftime('%Y-%m')
@@ -314,9 +326,58 @@ else:
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
+        # Formatear hover a moneda $,.2f
+        fig_line.update_traces(
+            hovertemplate="Monto: $%{y:,.2f}"
+        )
         st.plotly_chart(fig_line, use_container_width=True)
 
-    with col_right:
+    with row1_right:
+        # Gráfico de Dona: Distribución de Ventas por Canal
+        canal_grouped = filtered_sales.groupby('canal')['ventas'].sum().reset_index()
+        fig_pie = px.pie(
+            canal_grouped,
+            names='canal',
+            values='ventas',
+            title='Distribución de Ventas por Canal (Ingresos %)',
+            hole=0.4,
+            color_discrete_sequence=px.colors.qualitative.Pastel
+        )
+        # Formatear hover a moneda $,.2f
+        fig_pie.update_traces(
+            textinfo='percent+label',
+            hovertemplate="<b>%{label}</b><br>Ventas: $%{value:,.2f}<br>Porcentaje: %{percent}"
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("---")
+
+    row2_left, row2_right = st.columns(2)
+
+    with row2_left:
+        # Gráfico de Barras Horizontales: Ventas Totales por Región
+        region_grouped = filtered_sales.groupby('region')['ventas'].sum().reset_index()
+        fig_region = px.bar(
+            region_grouped,
+            x='ventas',
+            y='region',
+            orientation='h',
+            labels={'ventas': 'Ventas Totales ($)', 'region': 'Región'},
+            title='Ventas Totales por Región',
+            color='ventas',
+            color_continuous_scale='blues'
+        )
+        fig_region.update_layout(
+            yaxis={'categoryorder': 'total ascending'},
+            coloraxis_showscale=False
+        )
+        # Formatear hover a moneda $,.2f
+        fig_region.update_traces(
+            hovertemplate="<b>%{y}</b><br>Ventas: $%{x:,.2f}"
+        )
+        st.plotly_chart(fig_region, use_container_width=True)
+
+    with row2_right:
         # Gráfico de Barras: Top 5 de productos más vendidos en el periodo seleccionado
         product_grouped = filtered_sales.groupby('producto')['ventas'].sum().reset_index()
         top_products = product_grouped.sort_values('ventas', ascending=False).head(5)
@@ -331,9 +392,50 @@ else:
             color='ventas',
             color_continuous_scale='blues'
         )
-        # Ordenar barras para que el de mayor venta aparezca arriba
         fig_bar.update_layout(
             yaxis={'categoryorder': 'total ascending'},
             coloraxis_showscale=False
         )
+        # Formatear hover a moneda $,.2f
+        fig_bar.update_traces(
+            hovertemplate="<b>%{y}</b><br>Ventas: $%{x:,.2f}"
+        )
         st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.markdown("---")
+
+    row3_left, row3_right = st.columns(2)
+
+    with row3_left:
+        # Gráfico de Barras: Desempeño de Promociones (Con vs Sin Promoción)
+        promo_df = filtered_sales.copy()
+        promo_df['Con Promoción'] = promo_df['promocion_id'].apply(
+            lambda x: "Con Promoción" if pd.notna(x) and x != "" and str(x).lower() != "none" and x != 0 else "Sin Promoción"
+        )
+        promo_grouped = promo_df.groupby('Con Promoción')['ventas'].sum().reset_index()
+
+        fig_promo = px.bar(
+            promo_grouped,
+            x='Con Promoción',
+            y='ventas',
+            labels={'ventas': 'Ventas Totales ($)', 'Con Promoción': 'Estado Promocional'},
+            title='Desempeño de Ventas: Con vs. Sin Promoción',
+            color='Con Promoción',
+            color_discrete_map={"Con Promoción": "#1f77b4", "Sin Promoción": "#ff7f0e"}
+        )
+        # Formatear hover a moneda $,.2f
+        fig_promo.update_traces(
+            hovertemplate="<b>%{x}</b><br>Ventas: $%{y:,.2f}"
+        )
+        st.plotly_chart(fig_promo, use_container_width=True)
+
+    with row3_right:
+        # Mostrar resumen tabular de transacciones filtradas para llenar la cuadrícula elegantemente
+        st.subheader("Resumen de Métricas del Periodo")
+        st.write("A continuación se muestra el desglose del rendimiento del periodo seleccionado para auditoría:")
+
+        metrics_df = pd.DataFrame({
+            "Métrica": ["Ventas Totales", "Transacciones", "Ticket Promedio", "Descuentos Totales"],
+            "Valor": [format_currency_full(total_sales), format_number(total_transactions), format_currency_full(avg_ticket), format_currency_full(total_discounts)]
+        })
+        st.dataframe(metrics_df, hide_index=True, use_container_width=True)
