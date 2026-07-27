@@ -90,6 +90,8 @@ def flatten_sales(data):
             "precio_unitario_venta": row.get("precio_unitario_venta"),
             "descuento": row.get("descuento_aplicado") or 0.0,
             "ventas": row.get("monto_total") or 0.0,
+            "region_id": row.get("region_id"),
+            "canal_id": row.get("canal_id"),
             "producto": prod.get("nombre") or "Desconocido",
             "categoria": prod.get("categoria") or "Sin Categoría",
             "canal": chan.get("nombre") or "Desconocido",
@@ -102,28 +104,25 @@ def flatten_sales(data):
     return df
 
 def flatten_budget(data):
-    """Aplatana el JSON resultante de presupuestos de modelo relacional."""
+    """Aplatana el JSON resultante de presupuestos utilizando anio y mes."""
     records = []
     for row in data:
-        chan = row.get("canales") or {}
-        reg = row.get("regiones") or {}
-
-        if isinstance(chan, list) and len(chan) > 0:
-            chan = chan[0]
-        if isinstance(reg, list) and len(reg) > 0:
-            reg = reg[0]
-
         record = {
             "id": row.get("id"),
-            "fecha": row.get("fecha"),
-            "presupuesto": row.get("monto") or 0.0,
-            "canal": chan.get("nombre") or "Desconocido",
-            "region": reg.get("nombre") or "Desconocido"
+            "anio": row.get("anio"),
+            "mes": row.get("mes"),
+            "presupuesto": row.get("monto_presupuestado") or 0.0,
+            "region_id": row.get("region_id"),
+            "canal_id": row.get("canal_id")
         }
         records.append(record)
+
     df = pd.DataFrame(records)
-    if not df.empty and 'fecha' in df.columns:
-        df['fecha'] = pd.to_datetime(df['fecha'])
+    if not df.empty:
+        # Crear la columna sintética fecha combinando anio y mes
+        df['fecha'] = pd.to_datetime(
+            df['anio'].astype(str) + '-' + df['mes'].astype(str).str.zfill(2) + '-01'
+        )
     return df
 
 @st.cache_data
@@ -136,6 +135,7 @@ def load_all_data():
     try:
         sales_resp = client.table("ventas").select(
             "id, fecha, cantidad, precio_unitario_venta, descuento_aplicado, monto_total, "
+            "region_id, canal_id, "
             "productos(nombre, categoria), "
             "canales(nombre), "
             "regiones(nombre)"
@@ -146,12 +146,10 @@ def load_all_data():
         st.error(f"❌ **Error al consultar la tabla 'ventas'**: {e}")
         st.stop()
 
-    # Consulta de Presupuestos
+    # Consulta de Presupuestos adaptada al esquema real
     try:
         budget_resp = client.table("presupuestos").select(
-            "id, fecha, monto, "
-            "canales(nombre), "
-            "regiones(nombre)"
+            "id, anio, mes, monto_presupuestado, region_id, canal_id"
         ).execute()
         if budget_resp.data:
             df_budget = flatten_budget(budget_resp.data)
@@ -164,7 +162,18 @@ def load_all_data():
         st.stop()
 
     if df_budget is None:
-        df_budget = pd.DataFrame(columns=["id", "fecha", "presupuesto", "canal", "region"])
+        df_budget = pd.DataFrame(columns=["id", "fecha", "presupuesto", "canal_id", "region_id"])
+
+    # Mapeo de nombres de canal y región en presupuestos a partir de las ventas
+    if not df_budget.empty:
+        region_map = dict(zip(df_sales['region_id'].dropna(), df_sales['region'].dropna()))
+        canal_map = dict(zip(df_sales['canal_id'].dropna(), df_sales['canal'].dropna()))
+
+        df_budget['region'] = df_budget['region_id'].map(region_map).fillna("Desconocido")
+        df_budget['canal'] = df_budget['canal_id'].map(canal_map).fillna("Desconocido")
+    else:
+        df_budget['region'] = pd.Series(dtype=str)
+        df_budget['canal'] = pd.Series(dtype=str)
 
     return df_sales, df_budget
 
@@ -225,7 +234,7 @@ filtered_budget = df_budget[
     (df_budget['fecha'] <= end_dt) &
     (df_budget['region'].isin(selected_regions)) &
     (df_budget['canal'].isin(selected_channels))
-]
+] if not df_budget.empty else pd.DataFrame(columns=df_budget.columns)
 
 # Formateadores auxiliares para monedas y números
 def format_currency(value):
@@ -277,9 +286,12 @@ else:
         sales_monthly['Mes'] = sales_monthly['fecha'].dt.strftime('%Y-%m')
         sales_grouped = sales_monthly.groupby('Mes')['ventas'].sum().reset_index()
 
-        budget_monthly = filtered_budget.copy()
-        budget_monthly['Mes'] = budget_monthly['fecha'].dt.strftime('%Y-%m')
-        budget_grouped = budget_monthly.groupby('Mes')['presupuesto'].sum().reset_index()
+        if not filtered_budget.empty:
+            budget_monthly = filtered_budget.copy()
+            budget_monthly['Mes'] = budget_monthly['fecha'].dt.strftime('%Y-%m')
+            budget_grouped = budget_monthly.groupby('Mes')['presupuesto'].sum().reset_index()
+        else:
+            budget_grouped = pd.DataFrame(columns=['Mes', 'presupuesto'])
 
         # Combinar Ventas y Presupuesto por Mes
         merged_trend = pd.merge(sales_grouped, budget_grouped, on='Mes', how='outer').fillna(0)
