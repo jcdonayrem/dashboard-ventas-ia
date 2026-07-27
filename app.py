@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("📊 Dashboard de Ventas IA")
 
-# 1. Lectura de Credenciales de Supabase
+# 1. Lectura de Credenciales de Supabase desde st.secrets
 def get_supabase_credentials():
     url = None
     key = None
@@ -30,7 +30,6 @@ def get_supabase_credentials():
         try:
             if "supabase" in st.secrets:
                 sub_sec = st.secrets["supabase"]
-                # En Streamlit, st.secrets["supabase"] puede ser AttrDict o dict
                 if hasattr(sub_sec, "get"):
                     if not url:
                         url = sub_sec.get("url") or sub_sec.get("SUPABASE_URL") or sub_sec.get("supabase_url")
@@ -46,7 +45,6 @@ def get_supabase_credentials():
 
     return url, key
 
-# Intentar obtener las credenciales
 supabase_url, supabase_key = get_supabase_credentials()
 
 # Mostrar error explícito en pantalla si faltan credenciales
@@ -58,7 +56,7 @@ if not supabase_url or not supabase_key:
     """)
     st.stop()
 
-# 2. Inicialización del Cliente e Integración de Datos
+# 2. Inicialización del Cliente de Supabase
 @st.cache_resource
 def init_supabase(url, key):
     try:
@@ -67,70 +65,119 @@ def init_supabase(url, key):
         st.error(f"❌ **Error al inicializar el cliente de Supabase**: {e}")
         st.stop()
 
-# Inicialización
 client = init_supabase(supabase_url, supabase_key)
 
-def map_columns(df):
-    """Estandariza los nombres de las columnas de la base de datos."""
-    column_mapping = {
-        'monto': 'ventas',
-        'sales': 'ventas',
-        'amount': 'ventas',
-        'budget': 'presupuesto',
-        'discount': 'descuento',
-        'product': 'producto',
-        'sales_channel': 'canal_venta',
-        'canal': 'canal_venta',
-        'date': 'fecha'
-    }
-    df = df.rename(columns=column_mapping)
-    if 'fecha' in df.columns:
+# 3. Funciones de Aplanamiento y Carga de Datos Relacionales (Sin Fallback)
+def flatten_sales(data):
+    """Aplatana el JSON resultante de ventas de modelo relacional."""
+    records = []
+    for row in data:
+        prod = row.get("productos") or {}
+        chan = row.get("canales") or {}
+        reg = row.get("regiones") or {}
+
+        if isinstance(prod, list) and len(prod) > 0:
+            prod = prod[0]
+        if isinstance(chan, list) and len(chan) > 0:
+            chan = chan[0]
+        if isinstance(reg, list) and len(reg) > 0:
+            reg = reg[0]
+
+        record = {
+            "id": row.get("id"),
+            "fecha": row.get("fecha"),
+            "cantidad": row.get("cantidad"),
+            "precio_unitario_venta": row.get("precio_unitario_venta"),
+            "descuento": row.get("descuento_aplicado") or 0.0,
+            "ventas": row.get("monto_total") or 0.0,
+            "producto": prod.get("nombre") or "Desconocido",
+            "categoria": prod.get("categoria") or "Sin Categoría",
+            "canal": chan.get("nombre") or "Desconocido",
+            "region": reg.get("nombre") or "Desconocido"
+        }
+        records.append(record)
+    df = pd.DataFrame(records)
+    if not df.empty and 'fecha' in df.columns:
+        df['fecha'] = pd.to_datetime(df['fecha'])
+    return df
+
+def flatten_budget(data):
+    """Aplatana el JSON resultante de presupuestos de modelo relacional."""
+    records = []
+    for row in data:
+        chan = row.get("canales") or {}
+        reg = row.get("regiones") or {}
+
+        if isinstance(chan, list) and len(chan) > 0:
+            chan = chan[0]
+        if isinstance(reg, list) and len(reg) > 0:
+            reg = reg[0]
+
+        record = {
+            "id": row.get("id"),
+            "fecha": row.get("fecha"),
+            "presupuesto": row.get("monto") or 0.0,
+            "canal": chan.get("nombre") or "Desconocido",
+            "region": reg.get("nombre") or "Desconocido"
+        }
+        records.append(record)
+    df = pd.DataFrame(records)
+    if not df.empty and 'fecha' in df.columns:
         df['fecha'] = pd.to_datetime(df['fecha'])
     return df
 
 @st.cache_data
-def load_data_from_supabase():
-    df = None
-    last_error = None
+def load_all_data():
+    """Consulta la tabla ventas y presupuestos con sus relaciones directas de dimensiones."""
+    df_sales = None
+    df_budget = None
 
-    # 1. Intentar consultar tabla 'sales'
+    # Consulta Principal de Ventas
     try:
-        response = client.table("sales").select("*").execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df = map_columns(df)
-            return df
+        sales_resp = client.table("ventas").select(
+            "id, fecha, cantidad, precio_unitario_venta, descuento_aplicado, monto_total, "
+            "productos(nombre, categoria), "
+            "canales(nombre), "
+            "regiones(nombre)"
+        ).execute()
+        if sales_resp.data:
+            df_sales = flatten_sales(sales_resp.data)
     except Exception as e:
-        last_error = e
+        st.error(f"❌ **Error al consultar la tabla 'ventas'**: {e}")
+        st.stop()
 
-    # 2. Intentar consultar tabla 'ventas'
+    # Consulta de Presupuestos
     try:
-        response = client.table("ventas").select("*").execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df = map_columns(df)
-            return df
+        budget_resp = client.table("presupuestos").select(
+            "id, fecha, monto, "
+            "canales(nombre), "
+            "regiones(nombre)"
+        ).execute()
+        if budget_resp.data:
+            df_budget = flatten_budget(budget_resp.data)
     except Exception as e:
-        last_error = e
+        st.error(f"❌ **Error al consultar la tabla 'presupuestos'**: {e}")
+        st.stop()
 
-    # Si no se pudo obtener de ninguna tabla, mostrar error explícito en pantalla
-    st.error(f"""
-    ❌ **Error de Consulta de Datos**: No se pudo obtener registros de las tablas 'sales' o 'ventas' en Supabase.
+    if df_sales is None or df_sales.empty:
+        st.error("❌ **Error de Datos**: No se pudieron obtener registros válidos de la tabla 'ventas'.")
+        st.stop()
 
-    **Detalle del error:** {last_error}
-    """)
-    st.stop()
+    if df_budget is None:
+        df_budget = pd.DataFrame(columns=["id", "fecha", "presupuesto", "canal", "region"])
 
-# Cargar los datos directamente desde PostgreSQL
-df = load_data_from_supabase()
+    return df_sales, df_budget
 
-# 3. Barra Lateral (Sidebar) de Filtros (Sin alerta de Fallback)
+# Cargar los datos directamente desde PostgreSQL (Sin Fallback)
+df_sales, df_budget = load_all_data()
+
+# 4. Barra Lateral (Sidebar) de Filtros
 st.sidebar.header("Filtros de Datos")
 st.sidebar.success("⚡ Conectado a Supabase PostgreSQL")
 
-# Filtro de Rango de Fechas (por defecto abarcando todo el periodo disponible)
-min_date = df['fecha'].min().date()
-max_date = df['fecha'].max().date()
+# Filtro de Rango de Fechas (por defecto abarcando todo el periodo disponible en ventas)
+min_date = df_sales['fecha'].min().date()
+max_date = df_sales['fecha'].max().date()
 
 date_range = st.sidebar.date_input(
     "Selecciona Rango de Fechas",
@@ -147,7 +194,7 @@ else:
     end_date = start_date
 
 # Selección múltiple por Región
-all_regions = sorted(df['region'].unique().tolist())
+all_regions = sorted(df_sales['region'].unique().tolist())
 selected_regions = st.sidebar.multiselect(
     "Región",
     options=all_regions,
@@ -155,22 +202,29 @@ selected_regions = st.sidebar.multiselect(
 )
 
 # Selección múltiple por Canal de Venta
-all_channels = sorted(df['canal_venta'].unique().tolist())
+all_channels = sorted(df_sales['canal'].unique().tolist())
 selected_channels = st.sidebar.multiselect(
     "Canal de Venta",
     options=all_channels,
     default=all_channels
 )
 
-# Aplicar Filtros
+# Aplicar Filtros a Ventas y Presupuestos
 start_dt = pd.to_datetime(start_date)
 end_dt = pd.to_datetime(end_date)
 
-filtered_df = df[
-    (df['fecha'] >= start_dt) &
-    (df['fecha'] <= end_dt) &
-    (df['region'].isin(selected_regions)) &
-    (df['canal_venta'].isin(selected_channels))
+filtered_sales = df_sales[
+    (df_sales['fecha'] >= start_dt) &
+    (df_sales['fecha'] <= end_dt) &
+    (df_sales['region'].isin(selected_regions)) &
+    (df_sales['canal'].isin(selected_channels))
+]
+
+filtered_budget = df_budget[
+    (df_budget['fecha'] >= start_dt) &
+    (df_budget['fecha'] <= end_dt) &
+    (df_budget['region'].isin(selected_regions)) &
+    (df_budget['canal'].isin(selected_channels))
 ]
 
 # Formateadores auxiliares para monedas y números
@@ -180,8 +234,8 @@ def format_currency(value):
 def format_number(value):
     return f"{value:,}"
 
-# 4. Manejo de estados de 0 resultados y visualizaciones
-if filtered_df.empty:
+# 5. Manejo de estados de 0 resultados y visualizaciones
+if filtered_sales.empty:
     st.warning("⚠️ No hay resultados disponibles para los filtros seleccionados. Por favor, ajusta los criterios en la barra lateral.")
 
     # Tarjetas de KPIs vacías
@@ -196,10 +250,10 @@ if filtered_df.empty:
         st.metric("Descuentos Aplicados", "$0.00")
 else:
     # Cálculos de Métricas KPIs
-    total_sales = filtered_df['ventas'].sum()
-    total_transactions = len(filtered_df)
-    avg_ticket = filtered_df['ventas'].mean() if total_transactions > 0 else 0
-    total_discounts = filtered_df['descuento'].sum()
+    total_sales = filtered_sales['ventas'].sum()
+    total_transactions = len(filtered_sales)
+    avg_ticket = filtered_sales['ventas'].mean() if total_transactions > 0 else 0
+    total_discounts = filtered_sales['descuento'].sum()
 
     # Mostrar Tarjetas de KPIs (st.metric)
     col1, col2, col3, col4 = st.columns(4)
@@ -219,13 +273,20 @@ else:
 
     with col_left:
         # Gráfico de Líneas: Tendencia de ventas mensual vs. Presupuesto (Budget)
-        monthly_df = filtered_df.copy()
-        monthly_df['Mes'] = monthly_df['fecha'].dt.strftime('%Y-%m')
-        monthly_grouped = monthly_df.groupby('Mes')[['ventas', 'presupuesto']].sum().reset_index()
-        monthly_grouped = monthly_grouped.sort_values('Mes')
+        sales_monthly = filtered_sales.copy()
+        sales_monthly['Mes'] = sales_monthly['fecha'].dt.strftime('%Y-%m')
+        sales_grouped = sales_monthly.groupby('Mes')['ventas'].sum().reset_index()
+
+        budget_monthly = filtered_budget.copy()
+        budget_monthly['Mes'] = budget_monthly['fecha'].dt.strftime('%Y-%m')
+        budget_grouped = budget_monthly.groupby('Mes')['presupuesto'].sum().reset_index()
+
+        # Combinar Ventas y Presupuesto por Mes
+        merged_trend = pd.merge(sales_grouped, budget_grouped, on='Mes', how='outer').fillna(0)
+        merged_trend = merged_trend.sort_values('Mes')
 
         fig_line = px.line(
-            monthly_grouped,
+            merged_trend,
             x='Mes',
             y=['ventas', 'presupuesto'],
             labels={'value': 'Monto ($)', 'variable': 'Métrica', 'Mes': 'Mes'},
@@ -245,7 +306,7 @@ else:
 
     with col_right:
         # Gráfico de Barras: Top 5 de productos más vendidos en el periodo seleccionado
-        product_grouped = filtered_df.groupby('producto')['ventas'].sum().reset_index()
+        product_grouped = filtered_sales.groupby('producto')['ventas'].sum().reset_index()
         top_products = product_grouped.sort_values('ventas', ascending=False).head(5)
 
         fig_bar = px.bar(
