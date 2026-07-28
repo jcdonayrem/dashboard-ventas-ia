@@ -507,62 +507,37 @@ with tab_copilot:
         openai_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
         gemini_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
-        # Fallback de Simulación Inteligente para pruebas y demo si no hay llaves de API
         if not gemini_key and not openai_key:
-            prompt_lower = prompt.lower()
-            if "canal" in prompt_lower:
-                return (
-                    "SELECT c.nombre as canal, SUM(v.monto_total) as ventas_totales FROM ventas v JOIN canales c ON v.canal_id = c.id GROUP BY c.nombre ORDER BY ventas_totales DESC LIMIT 1;",
-                    "Consulta simulada de Text-to-SQL (Sin llaves de API configuradas). Identifica el canal de ventas con mayores ingresos agregando el monto total por cada canal."
-                )
-            elif "regi" in prompt_lower:
-                return (
-                    "SELECT r.nombre as region, SUM(v.monto_total) as ventas_totales FROM ventas v JOIN regiones r ON v.region_id = r.id GROUP BY r.nombre ORDER BY ventas_totales DESC;",
-                    "Consulta simulada de Text-to-SQL (Sin llaves de API configuradas). Calcula la distribución de ingresos agregados por región."
-                )
-            else:
-                return (
-                    "SELECT id, fecha, monto_total FROM ventas LIMIT 5;",
-                    "Consulta simulada de Text-to-SQL (Sin llaves de API configuradas). Muestra las últimas 5 transacciones de ventas registradas."
-                )
+            raise Exception("No se configuraron las llaves de API (GEMINI_API_KEY u OPENAI_API_KEY) en los secrets para realizar la generación real de SQL.")
 
         system_prompt = f"""
-        Eres un Copiloto de Inteligencia Artificial experto en PostgreSQL y Text-to-SQL.
-        Tu único objetivo es traducir la pregunta en lenguaje natural del usuario a una consulta SQL ejecutable en PostgreSQL.
+        Eres un traductor experto de lenguaje natural a SQL para PostgreSQL.
+        Tu única tarea es generar la consulta SQL que responda exactamente a la pregunta del usuario basándote en la estructura de base de datos relacional y sus reglas de negocio.
 
-        Utiliza el siguiente esquema de base de datos y reglas de negocio:
+        Estructura de la base de datos y Metadatos:
         {metadata_str}
 
         IMPORTANTE:
-        - Retorna ÚNICAMENTE un JSON bien formado con exactamente dos campos:
-          "sql": La consulta SQL pura (sin bloques de código ```sql ... ```, sin markdown).
-          "explicacion": Una breve explicación en español sobre cómo la consulta responde a la pregunta.
-
-        Ejemplo de formato de respuesta:
-        {{
-          "sql": "SELECT * FROM ventas LIMIT 5;",
-          "explicacion": "Esta consulta selecciona las últimas 5 transacciones de venta."
-        }}
+        - Responde ÚNICAMENTE con la consulta SQL ejecutable.
+        - No uses bloques de código Markdown (como ```sql o ```). Retorna solo texto plano.
+        - Si de todas formas decides usar bloques Markdown, nos aseguraremos de limpiarlos, pero preferimos texto plano directo.
+        - Asegúrate de respetar los nombres de tablas y columnas indicados en los metadatos.
         """
 
-        try:
-            if gemini_key:
-                response_text = call_gemini_api(prompt, system_prompt, gemini_key)
-            else:
-                response_text = call_openai_api(prompt, system_prompt, openai_key)
+        if gemini_key:
+            response_text = call_gemini_api(prompt, system_prompt, gemini_key)
+        else:
+            response_text = call_openai_api(prompt, system_prompt, openai_key)
 
-            # Limpiar respuesta markdown
-            response_text = response_text.strip()
-            if response_text.startswith("```json"):
-                response_text = response_text[7:]
-            if response_text.endswith("```"):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
+        # Limpiar la respuesta adecuadamente (eliminar Markdown ```sql, etc.)
+        sql = response_text.strip()
+        if "```sql" in sql:
+            sql = sql.split("```sql")[1].split("```")[0].strip()
+        elif "```" in sql:
+            sql = sql.split("```")[1].split("```")[0].strip()
 
-            parsed = json.loads(response_text)
-            return parsed["sql"], parsed["explicacion"]
-        except Exception as e:
-            raise Exception(f"Error al generar SQL mediante el LLM: {e}")
+        sql_clean = sql.strip().rstrip(";")
+        return sql_clean
 
     # Registrar en la tabla historial_chat
     def register_chat_history(pregunta, sql_generado, estado):
@@ -599,23 +574,25 @@ with tab_copilot:
             metadata_str = get_schema_metadata()
 
             try:
-                # Flujo: Pregunta -> Text-to-SQL -> Explicación
-                with st.spinner("Copiloto IA pensando..."):
-                    sql, explanation = generate_text_to_sql(prompt, metadata_str)
+                # Flujo: Pregunta -> Text-to-SQL Real
+                with st.spinner("Copiloto IA pensando y generando SQL..."):
+                    sql_clean = generate_text_to_sql(prompt, metadata_str)
+
+                explanation = f"Consulta SQL generada para responder a: '{prompt}'"
 
                 st.write(explanation)
 
                 with st.expander("Ver consulta SQL generada"):
-                    st.code(sql, language="sql")
+                    st.code(sql_clean, language="sql")
 
                 # Flujo de ejecución Text-to-SQL y conversión de respuesta de Supabase RPC run_sql a DataFrame de Pandas
                 with st.spinner("Ejecutando consulta en PostgreSQL..."):
                     try:
                         # Limpiar el query para evitar errores de sintaxis en subconsultas
-                        sql_query_clean = sql.strip().rstrip(";")
+                        sql_to_run = sql_clean.strip().rstrip(";")
 
                         # Ejecutar la función RPC en Supabase
-                        response = client.rpc("run_sql", {"query": sql_query_clean}).execute()
+                        response = client.rpc("run_sql", {"query": sql_to_run}).execute()
                         data = response.data
 
                         # Si data viene como string (JSON en texto), lo parseamos
@@ -626,42 +603,42 @@ with tab_copilot:
                         # Validar si hubo un error retornado por la función SQL
                         if isinstance(data, dict) and "error" in data:
                             st.error(f"Error en la consulta SQL: {data['error']}")
-                            register_chat_history(prompt, sql_query_clean, f"Error SQL: {data['error']}")
+                            register_chat_history(prompt, sql_to_run, f"Error SQL: {data['error']}")
                             st.session_state.messages.append({
                                 "role": "assistant",
-                                "content": f"{explanation}\n\n❌ Error en la consulta SQL: {data['error']}",
-                                "sql": sql_query_clean
+                                "content": f"❌ Error en la consulta SQL: {data['error']}",
+                                "sql": sql_to_run
                             })
                         else:
-                            # Si data es un diccionario único (p. ej. escalar o registro único), lo envolvedmos en una lista
+                            # Si data es un diccionario único (p. ej. escalar o registro único), lo envolvemos en una lista
                             if isinstance(data, dict):
                                 data = [data]
 
                             if data:
                                 df_result = pd.DataFrame(data)
                                 st.dataframe(df_result, use_container_width=True)
-                                register_chat_history(prompt, sql_query_clean, "Exitoso")
+                                register_chat_history(prompt, sql_to_run, "Exitoso")
                                 st.session_state.messages.append({
                                     "role": "assistant",
                                     "content": explanation,
-                                    "sql": sql_query_clean,
+                                    "sql": sql_to_run,
                                     "df_result": df_result
                                 })
                             else:
                                 st.info("La consulta no devolvió resultados.")
-                                register_chat_history(prompt, sql_query_clean, "Sin resultados")
+                                register_chat_history(prompt, sql_to_run, "Sin resultados")
                                 st.session_state.messages.append({
                                     "role": "assistant",
-                                    "content": f"{explanation}\n\n*La consulta no devolvió resultados.*",
-                                    "sql": sql_query_clean
+                                    "content": "*La consulta no devolvió resultados.*",
+                                    "sql": sql_to_run
                                 })
                     except Exception as e:
                         st.error(f"Error al ejecutar la consulta SQL: {e}")
-                        register_chat_history(prompt, sql, f"Error de Conexión: {e}")
+                        register_chat_history(prompt, sql_clean, f"Error de Conexión: {e}")
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": f"Lo siento, ocurrió un problema al ejecutar la consulta SQL: {e}",
-                            "sql": sql
+                            "sql": sql_clean
                         })
             except Exception as e:
                 st.error(f"❌ **Error durante la generación**: {e}")
