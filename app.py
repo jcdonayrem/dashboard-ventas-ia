@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import requests
+import json
+import os
 from supabase import create_client, Client
 
 # Configuración de la página de Streamlit
@@ -184,63 +187,7 @@ def load_all_data():
 # Cargar los datos directamente desde PostgreSQL (Sin Fallback)
 df_sales, df_budget = load_all_data()
 
-# 4. Barra Lateral (Sidebar) de Filtros
-st.sidebar.header("Filtros de Datos")
-st.sidebar.success("⚡ Conectado a Supabase PostgreSQL")
-
-# Filtro de Rango de Fechas (por defecto abarcando todo el periodo disponible en ventas)
-min_date = df_sales['fecha'].min().date()
-max_date = df_sales['fecha'].max().date()
-
-date_range = st.sidebar.date_input(
-    "Selecciona Rango de Fechas",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date
-)
-
-# Control robusto para rango de fechas incompleto durante selección del usuario
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = date_range
-else:
-    start_date = date_range[0] if isinstance(date_range, (list, tuple)) else date_range
-    end_date = start_date
-
-# Selección múltiple por Región
-all_regions = sorted(df_sales['region'].unique().tolist())
-selected_regions = st.sidebar.multiselect(
-    "Región",
-    options=all_regions,
-    default=all_regions
-)
-
-# Selección múltiple por Canal de Venta
-all_channels = sorted(df_sales['canal'].unique().tolist())
-selected_channels = st.sidebar.multiselect(
-    "Canal de Venta",
-    options=all_channels,
-    default=all_channels
-)
-
-# Aplicar Filtros a Ventas y Presupuestos
-start_dt = pd.to_datetime(start_date)
-end_dt = pd.to_datetime(end_date)
-
-filtered_sales = df_sales[
-    (df_sales['fecha'] >= start_dt) &
-    (df_sales['fecha'] <= end_dt) &
-    (df_sales['region'].isin(selected_regions)) &
-    (df_sales['canal'].isin(selected_channels))
-]
-
-filtered_budget = df_budget[
-    (df_budget['fecha'] >= start_dt) &
-    (df_budget['fecha'] <= end_dt) &
-    (df_budget['region'].isin(selected_regions)) &
-    (df_budget['canal'].isin(selected_channels))
-] if not df_budget.empty else pd.DataFrame(columns=df_budget.columns)
-
-# Formateadores auxiliares para monedas y números con abreviaciones
+# 4. Formateadores auxiliares para monedas y números con abreviaciones
 def format_currency_short(value):
     """Abrevia cifras grandes para evitar que el texto se corte."""
     if value >= 1_000_000:
@@ -256,188 +203,484 @@ def format_currency_full(value):
 def format_number(value):
     return f"{value:,}"
 
-# 5. Manejo de estados de 0 resultados y visualizaciones
-if filtered_sales.empty:
-    st.warning("⚠️ No hay resultados disponibles para los filtros seleccionados. Por favor, ajusta los criterios en la barra lateral.")
+# 5. Estructura de Pestañas Principales
+tab_dashboard, tab_copilot, tab_whatif = st.tabs([
+    "📊 Dashboard Analytics",
+    "💬 Copiloto IA (Text-to-SQL)",
+    "🔮 Simulaciones What-If"
+])
 
-    # Tarjetas de KPIs vacías
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Ventas Totales", "$0.00")
-    with col2:
-        st.metric("Total de Transacciones", "0")
-    with col3:
-        st.metric("Ticket Promedio", "$0.00")
-    with col4:
-        st.metric("Descuentos Aplicados", "$0.00")
-else:
-    # Cálculos de Métricas KPIs
-    total_sales = filtered_sales['ventas'].sum()
-    total_transactions = len(filtered_sales)
-    avg_ticket = filtered_sales['ventas'].mean() if total_transactions > 0 else 0
-    # Asegurando suma del descuento_aplicado correctamente convertido a float
-    total_discounts = filtered_sales['descuento_aplicado'].sum()
+# ==================== PESTAÑA 1: DASHBOARD ANALYTICS ====================
+with tab_dashboard:
+    # Barra Lateral (Sidebar) de Filtros específica para el Dashboard
+    st.sidebar.header("Filtros de Datos")
+    st.sidebar.success("⚡ Conectado a Supabase PostgreSQL")
 
-    # Mostrar Tarjetas de KPIs con st.metric
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Ventas Totales", format_currency_short(total_sales), help=format_currency_full(total_sales))
-    with col2:
-        st.metric("Total de Transacciones", format_number(total_transactions))
-    with col3:
-        st.metric("Ticket Promedio", format_currency_full(avg_ticket))
-    with col4:
-        st.metric("Descuentos Aplicados", format_currency_short(total_discounts), help=format_currency_full(total_discounts))
+    # Filtro de Rango de Fechas (por defecto abarcando todo el periodo disponible en ventas)
+    min_date = df_sales['fecha'].min().date()
+    max_date = df_sales['fecha'].max().date()
 
-    st.markdown("---")
+    date_range = st.sidebar.date_input(
+        "Selecciona Rango de Fechas",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
+    )
 
-    # Layout y Diseño: Cuadrícula de 2 columnas equilibrada
-    row1_left, row1_right = st.columns(2)
+    # Control robusto para rango de fechas incompleto durante selección del usuario
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date = date_range[0] if isinstance(date_range, (list, tuple)) else date_range
+        end_date = start_date
 
-    with row1_left:
-        # Gráfico de Líneas: Tendencia de ventas mensual vs. Presupuesto (Budget)
-        sales_monthly = filtered_sales.copy()
-        sales_monthly['Mes'] = sales_monthly['fecha'].dt.strftime('%Y-%m')
-        sales_grouped = sales_monthly.groupby('Mes')['ventas'].sum().reset_index()
+    # Selección múltiple por Región
+    all_regions = sorted(df_sales['region'].unique().tolist())
+    selected_regions = st.sidebar.multiselect(
+        "Región",
+        options=all_regions,
+        default=all_regions
+    )
 
-        if not filtered_budget.empty:
-            budget_monthly = filtered_budget.copy()
-            budget_monthly['Mes'] = budget_monthly['fecha'].dt.strftime('%Y-%m')
-            budget_grouped = budget_monthly.groupby('Mes')['presupuesto'].sum().reset_index()
-        else:
-            budget_grouped = pd.DataFrame(columns=['Mes', 'presupuesto'])
+    # Selección múltiple por Canal de Venta
+    all_channels = sorted(df_sales['canal'].unique().tolist())
+    selected_channels = st.sidebar.multiselect(
+        "Canal de Venta",
+        options=all_channels,
+        default=all_channels
+    )
 
-        # Combinar Ventas y Presupuesto por Mes
-        merged_trend = pd.merge(sales_grouped, budget_grouped, on='Mes', how='outer').fillna(0)
-        merged_trend = merged_trend.sort_values('Mes')
+    # Aplicar Filtros a Ventas y Presupuestos
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
 
-        fig_line = px.line(
-            merged_trend,
-            x='Mes',
-            y=['ventas', 'presupuesto'],
-            labels={'value': 'Monto ($)', 'variable': 'Métrica', 'Mes': 'Mes'},
-            title='Tendencia de Ventas Mensual vs. Presupuesto (Budget)',
-            markers=True
+    filtered_sales = df_sales[
+        (df_sales['fecha'] >= start_dt) &
+        (df_sales['fecha'] <= end_dt) &
+        (df_sales['region'].isin(selected_regions)) &
+        (df_sales['canal'].isin(selected_channels))
+    ]
+
+    filtered_budget = df_budget[
+        (df_budget['fecha'] >= start_dt) &
+        (df_budget['fecha'] <= end_dt) &
+        (df_budget['region'].isin(selected_regions)) &
+        (df_budget['canal'].isin(selected_channels))
+    ] if not df_budget.empty else pd.DataFrame(columns=df_budget.columns)
+
+    # Manejo de estados de 0 resultados y visualizaciones
+    if filtered_sales.empty:
+        st.warning("⚠️ No hay resultados disponibles para los filtros seleccionados. Por favor, ajusta los criterios en la barra lateral.")
+
+        # Tarjetas de KPIs vacías
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Ventas Totales", "$0.00")
+        with col2:
+            st.metric("Total de Transacciones", "0")
+        with col3:
+            st.metric("Ticket Promedio", "$0.00")
+        with col4:
+            st.metric("Descuentos Aplicados", "$0.00")
+    else:
+        # Cálculos de Métricas KPIs
+        total_sales = filtered_sales['ventas'].sum()
+        total_transactions = len(filtered_sales)
+        avg_ticket = filtered_sales['ventas'].mean() if total_transactions > 0 else 0
+        total_discounts = filtered_sales['descuento_aplicado'].sum()
+
+        # Mostrar Tarjetas de KPIs con st.metric
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Ventas Totales", format_currency_short(total_sales), help=format_currency_full(total_sales))
+        with col2:
+            st.metric("Total de Transacciones", format_number(total_transactions))
+        with col3:
+            st.metric("Ticket Promedio", format_currency_full(avg_ticket))
+        with col4:
+            st.metric("Descuentos Aplicados", format_currency_short(total_discounts), help=format_currency_full(total_discounts))
+
+        st.markdown("---")
+
+        # Layout y Diseño: Cuadrícula de 2 columnas equilibrada
+        row1_left, row1_right = st.columns(2)
+
+        with row1_left:
+            # Gráfico de Líneas: Tendencia de ventas mensual vs. Presupuesto (Budget)
+            sales_monthly = filtered_sales.copy()
+            sales_monthly['Mes'] = sales_monthly['fecha'].dt.strftime('%Y-%m')
+            sales_grouped = sales_monthly.groupby('Mes')['ventas'].sum().reset_index()
+
+            if not filtered_budget.empty:
+                budget_monthly = filtered_budget.copy()
+                budget_monthly['Mes'] = budget_monthly['fecha'].dt.strftime('%Y-%m')
+                budget_grouped = budget_monthly.groupby('Mes')['presupuesto'].sum().reset_index()
+            else:
+                budget_grouped = pd.DataFrame(columns=['Mes', 'presupuesto'])
+
+            # Combinar Ventas y Presupuesto por Mes
+            merged_trend = pd.merge(sales_grouped, budget_grouped, on='Mes', how='outer').fillna(0)
+            merged_trend = merged_trend.sort_values('Mes')
+
+            fig_line = px.line(
+                merged_trend,
+                x='Mes',
+                y=['ventas', 'presupuesto'],
+                labels={'value': 'Monto ($)', 'variable': 'Métrica', 'Mes': 'Mes'},
+                title='Tendencia de Ventas Mensual vs. Presupuesto (Budget)',
+                markers=True
+            )
+
+            new_names = {'ventas': 'Ventas Reales', 'presupuesto': 'Presupuesto'}
+            fig_line.for_each_trace(lambda t: t.update(name = new_names.get(t.name, t.name)))
+
+            fig_line.update_layout(
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            fig_line.update_traces(
+                hovertemplate="Monto: $%{y:,.2f}"
+            )
+            st.plotly_chart(fig_line, use_container_width=True)
+
+        with row1_right:
+            # Gráfico de Dona: Distribución de Ventas por Canal
+            canal_grouped = filtered_sales.groupby('canal')['ventas'].sum().reset_index()
+            fig_pie = px.pie(
+                canal_grouped,
+                names='canal',
+                values='ventas',
+                title='Distribución de Ventas por Canal (Ingresos %)',
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Pastel
+            )
+            fig_pie.update_traces(
+                textinfo='percent+label',
+                hovertemplate="<b>%{label}</b><br>Ventas: $%{value:,.2f}<br>Porcentaje: %{percent}"
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        st.markdown("---")
+
+        row2_left, row2_right = st.columns(2)
+
+        with row2_left:
+            # Gráfico de Barras Horizontales: Ventas Totales por Región
+            region_grouped = filtered_sales.groupby('region')['ventas'].sum().reset_index()
+            fig_region = px.bar(
+                region_grouped,
+                x='ventas',
+                y='region',
+                orientation='h',
+                labels={'ventas': 'Ventas Totales ($)', 'region': 'Región'},
+                title='Ventas Totales por Región',
+                color='ventas',
+                color_continuous_scale='blues'
+            )
+            fig_region.update_layout(
+                yaxis={'categoryorder': 'total ascending'},
+                coloraxis_showscale=False
+            )
+            fig_region.update_traces(
+                hovertemplate="<b>%{y}</b><br>Ventas: $%{x:,.2f}"
+            )
+            st.plotly_chart(fig_region, use_container_width=True)
+
+        with row2_right:
+            # Gráfico de Barras: Top 5 de productos más vendidos en el periodo seleccionado
+            product_grouped = filtered_sales.groupby('producto')['ventas'].sum().reset_index()
+            top_products = product_grouped.sort_values('ventas', ascending=False).head(5)
+
+            fig_bar = px.bar(
+                top_products,
+                x='ventas',
+                y='producto',
+                orientation='h',
+                labels={'ventas': 'Ventas Totales ($)', 'producto': 'Producto'},
+                title='Top 5 Productos más Vendidos',
+                color='ventas',
+                color_continuous_scale='blues'
+            )
+            fig_bar.update_layout(
+                yaxis={'categoryorder': 'total ascending'},
+                coloraxis_showscale=False
+            )
+            fig_bar.update_traces(
+                hovertemplate="<b>%{y}</b><br>Ventas: $%{x:,.2f}"
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.markdown("---")
+
+        row3_left, row3_right = st.columns(2)
+
+        with row3_left:
+            # Gráfico de Barras: Desempeño de Promociones (Con vs Sin Promoción)
+            promo_df = filtered_sales.copy()
+            promo_df['Con Promoción'] = promo_df['promocion_id'].apply(
+                lambda x: "Con Promoción" if pd.notna(x) and x != "" and str(x).lower() != "none" and x != 0 else "Sin Promoción"
+            )
+            promo_grouped = promo_df.groupby('Con Promoción')['ventas'].sum().reset_index()
+
+            fig_promo = px.bar(
+                promo_grouped,
+                x='Con Promoción',
+                y='ventas',
+                labels={'ventas': 'Ventas Totales ($)', 'Con Promoción': 'Estado Promocional'},
+                title='Desempeño de Ventas: Con vs. Sin Promoción',
+                color='Con Promoción',
+                color_discrete_map={"Con Promoción": "#1f77b4", "Sin Promoción": "#ff7f0e"}
+            )
+            fig_promo.update_traces(
+                hovertemplate="<b>%{x}</b><br>Ventas: $%{y:,.2f}"
+            )
+            st.plotly_chart(fig_promo, use_container_width=True)
+
+        with row3_right:
+            st.subheader("Resumen de Métricas del Periodo")
+            st.write("A continuación se muestra el desglose del rendimiento del periodo seleccionado para auditoría:")
+
+            metrics_df = pd.DataFrame({
+                "Métrica": ["Ventas Totales", "Transacciones", "Ticket Promedio", "Descuentos Totales"],
+                "Valor": [format_currency_full(total_sales), format_number(total_transactions), format_currency_full(avg_ticket), format_currency_full(total_discounts)]
+            })
+            st.dataframe(metrics_df, hide_index=True, use_container_width=True)
+
+
+# ==================== PESTAÑA 2: COPILOTO IA (TEXT-TO-SQL) ====================
+with tab_copilot:
+    st.header("💬 Copiloto IA (Text-to-SQL Chatbot)")
+    st.write("Consulta la base de datos de ventas en lenguaje natural. Tu pregunta se traducirá automáticamente a PostgreSQL y se ejecutará en tiempo real.")
+
+    # 1. Recuperación de Metadatos del Esquema de Supabase
+    @st.cache_data(ttl=600)
+    def get_schema_metadata():
+        try:
+            resp = client.table("metadatos_esquema").select("*").execute()
+            if resp.data:
+                meta_text = "Metadatos del Esquema de la Base de Datos Relacional:\n"
+                for row in resp.data:
+                    meta_text += f"\n- Tabla: {row.get('tabla') or row.get('nombre_tabla')}\n"
+                    meta_text += f"  Descripción: {row.get('descripcion')}\n"
+                    meta_text += f"  Columnas: {row.get('columnas')}\n"
+                    reglas = row.get('reglas_negocio') or row.get('reglas')
+                    if reglas:
+                        meta_text += f"  Reglas de Negocio: {reglas}\n"
+                return meta_text
+        except Exception as e:
+            st.sidebar.warning(f"No se pudieron cargar los metadatos del esquema: {e}")
+        return "Esquema relacional estándar: tablas 'ventas', 'productos', 'regiones', 'canales', 'presupuestos'"
+
+    # 2. Funciones de Llamada Directa a LLM (Gemini / OpenAI) sin dependencias complejas
+    def call_gemini_api(prompt, system_prompt, api_key):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {"temperature": 0.0}
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    def call_openai_api(prompt, system_prompt, api_key):
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.0
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    def generate_text_to_sql(prompt, metadata_str):
+        # Buscar llaves en secrets y env
+        openai_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        gemini_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+        # Fallback de Simulación Inteligente para pruebas y demo si no hay llaves de API
+        if not gemini_key and not openai_key:
+            prompt_lower = prompt.lower()
+            if "canal" in prompt_lower:
+                return (
+                    "SELECT c.nombre as canal, SUM(v.monto_total) as ventas_totales FROM ventas v JOIN canales c ON v.canal_id = c.id GROUP BY c.nombre ORDER BY ventas_totales DESC LIMIT 1;",
+                    "Consulta simulada de Text-to-SQL (Sin llaves de API configuradas). Identifica el canal de ventas con mayores ingresos agregando el monto total por cada canal."
+                )
+            elif "regi" in prompt_lower:
+                return (
+                    "SELECT r.nombre as region, SUM(v.monto_total) as ventas_totales FROM ventas v JOIN regiones r ON v.region_id = r.id GROUP BY r.nombre ORDER BY ventas_totales DESC;",
+                    "Consulta simulada de Text-to-SQL (Sin llaves de API configuradas). Calcula la distribución de ingresos agregados por región."
+                )
+            else:
+                return (
+                    "SELECT id, fecha, monto_total FROM ventas LIMIT 5;",
+                    "Consulta simulada de Text-to-SQL (Sin llaves de API configuradas). Muestra las últimas 5 transacciones de ventas registradas."
+                )
+
+        system_prompt = f"""
+        Eres un Copiloto de Inteligencia Artificial experto en PostgreSQL y Text-to-SQL.
+        Tu único objetivo es traducir la pregunta en lenguaje natural del usuario a una consulta SQL ejecutable en PostgreSQL.
+
+        Utiliza el siguiente esquema de base de datos y reglas de negocio:
+        {metadata_str}
+
+        IMPORTANTE:
+        - Retorna ÚNICAMENTE un JSON bien formado con exactamente dos campos:
+          "sql": La consulta SQL pura (sin bloques de código ```sql ... ```, sin markdown).
+          "explicacion": Una breve explicación en español sobre cómo la consulta responde a la pregunta.
+
+        Ejemplo de formato de respuesta:
+        {{
+          "sql": "SELECT * FROM ventas LIMIT 5;",
+          "explicacion": "Esta consulta selecciona las últimas 5 transacciones de venta."
+        }}
+        """
+
+        try:
+            if gemini_key:
+                response_text = call_gemini_api(prompt, system_prompt, gemini_key)
+            else:
+                response_text = call_openai_api(prompt, system_prompt, openai_key)
+
+            # Limpiar respuesta markdown
+            response_text = response_text.strip()
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+            response_text = response_text.strip()
+
+            parsed = json.loads(response_text)
+            return parsed["sql"], parsed["explicacion"]
+        except Exception as e:
+            raise Exception(f"Error al generar SQL mediante el LLM: {e}")
+
+    # 3. Función para Ejecutar Raw SQL de forma segura en Supabase usando RPC comunes
+    def run_raw_sql(client, sql):
+        last_error = None
+        # Probar con los diferentes nombres comunes de funciones RPC de Postgres en Supabase
+        for fn_name, param_name in [("ejecutar_sql", "query_sql"), ("exec_sql", "query_text"), ("run_sql", "query")]:
+            try:
+                res = client.rpc(fn_name, {param_name: sql}).execute()
+                if res.data is not None:
+                    return pd.DataFrame(res.data)
+            except Exception as e:
+                last_error = e
+        raise Exception(f"Error al ejecutar consulta SQL en Supabase: {last_error or 'RPC no configurado'}")
+
+    # 4. Registrar en la tabla historial_chat
+    def register_chat_history(pregunta, sql_generado, estado):
+        try:
+            client.table("historial_chat").insert({
+                "pregunta": pregunta,
+                "sql_generado": sql_generado,
+                "estado": estado
+            }).execute()
+        except Exception:
+            pass
+
+    # 5. Historial de Chat interactivo (st.session_state.messages)
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Mostrar conversación previa
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+            if "sql" in msg:
+                with st.expander("Ver consulta SQL generada"):
+                    st.code(msg["sql"], language="sql")
+            if "df_result" in msg and msg["df_result"] is not None:
+                st.dataframe(msg["df_result"])
+
+    # Entrada de Chat
+    if prompt := st.chat_input("Escribe tu pregunta sobre las ventas..."):
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        with st.chat_message("assistant"):
+            metadata_str = get_schema_metadata()
+
+            try:
+                # Flujo: Pregunta -> Text-to-SQL -> Explicación
+                with st.spinner("Copiloto IA pensando..."):
+                    sql, explanation = generate_text_to_sql(prompt, metadata_str)
+
+                st.write(explanation)
+
+                with st.expander("Ver consulta SQL generada"):
+                    st.code(sql, language="sql")
+
+                # Flujo: Ejecutar SQL -> DataFrame
+                with st.spinner("Ejecutando consulta en PostgreSQL..."):
+                    df_result = run_raw_sql(client, sql)
+
+                if df_result is not None and not df_result.empty:
+                    st.dataframe(df_result)
+                    register_chat_history(prompt, sql, "Exitoso")
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": explanation,
+                        "sql": sql,
+                        "df_result": df_result
+                    })
+                else:
+                    st.info("La consulta se ejecutó exitosamente pero no devolvió ningún registro.")
+                    register_chat_history(prompt, sql, "Sin resultados")
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"{explanation}\n\n*La consulta se ejecutó exitosamente pero no devolvió ningún registro.*",
+                        "sql": sql
+                    })
+            except Exception as e:
+                # Captura amigable de errores en la ejecución del SQL
+                st.error(f"❌ **Error durante la ejecución**: {e}")
+                register_chat_history(prompt, "", f"Fallido: {e}")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": f"Lo siento, ocurrió un problema al procesar tu solicitud: {e}"
+                })
+
+
+# ==================== PESTAÑA 3: SIMULACIONES WHAT-IF ====================
+with tab_whatif:
+    st.header("🔮 Simulaciones de Escenarios What-If")
+    st.write("Ajusta las variables de negocio para proyectar de manera instantánea el impacto en las ventas totales:")
+
+    # Sliders Interactivos
+    incremento_precio = st.slider("Incremento en Precio Unitario (%)", -20.0, 50.0, 0.0, 1.0)
+    incremento_volumen = st.slider("Incremento en Volumen de Transacciones (%)", -20.0, 100.0, 0.0, 1.0)
+    descuento_promedio = st.slider("Descuento Promedio Aplicado (%)", 0.0, 50.0, 5.0, 0.5)
+
+    # Calcular Proyecciones
+    current_sales = df_sales['ventas'].sum() if not df_sales.empty else 0.0
+    factor_precio = 1 + (incremento_precio / 100.0)
+    factor_volumen = 1 + (incremento_volumen / 100.0)
+    # Suponiendo que el descuento por defecto en las ventas actuales es del 5% aproximadamente, proyectamos la diferencia
+    factor_descuento = 1 - (descuento_promedio / 100.0)
+
+    projected_sales = current_sales * factor_precio * factor_volumen * (factor_descuento / 0.95)
+
+    st.markdown("### Proyección de Resultados de Negocio")
+    col_cur, col_proj, col_diff = st.columns(3)
+    with col_cur:
+        st.metric("Ventas Actuales", format_currency_short(current_sales))
+    with col_proj:
+        st.metric("Ventas Proyectadas", format_currency_short(projected_sales))
+    with col_diff:
+        cambio = projected_sales - current_sales
+        st.metric(
+            "Variación Estimada",
+            format_currency_short(cambio),
+            delta=f"{((projected_sales - current_sales) / current_sales * 100):+.1f}%" if current_sales > 0 else "0.0%"
         )
-
-        # Renombrar leyendas para mejor legibilidad
-        new_names = {'ventas': 'Ventas Reales', 'presupuesto': 'Presupuesto'}
-        fig_line.for_each_trace(lambda t: t.update(name = new_names.get(t.name, t.name)))
-
-        fig_line.update_layout(
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        # Formatear hover a moneda $,.2f
-        fig_line.update_traces(
-            hovertemplate="Monto: $%{y:,.2f}"
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
-
-    with row1_right:
-        # Gráfico de Dona: Distribución de Ventas por Canal
-        canal_grouped = filtered_sales.groupby('canal')['ventas'].sum().reset_index()
-        fig_pie = px.pie(
-            canal_grouped,
-            names='canal',
-            values='ventas',
-            title='Distribución de Ventas por Canal (Ingresos %)',
-            hole=0.4,
-            color_discrete_sequence=px.colors.qualitative.Pastel
-        )
-        # Formatear hover a moneda $,.2f
-        fig_pie.update_traces(
-            textinfo='percent+label',
-            hovertemplate="<b>%{label}</b><br>Ventas: $%{value:,.2f}<br>Porcentaje: %{percent}"
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    st.markdown("---")
-
-    row2_left, row2_right = st.columns(2)
-
-    with row2_left:
-        # Gráfico de Barras Horizontales: Ventas Totales por Región
-        region_grouped = filtered_sales.groupby('region')['ventas'].sum().reset_index()
-        fig_region = px.bar(
-            region_grouped,
-            x='ventas',
-            y='region',
-            orientation='h',
-            labels={'ventas': 'Ventas Totales ($)', 'region': 'Región'},
-            title='Ventas Totales por Región',
-            color='ventas',
-            color_continuous_scale='blues'
-        )
-        fig_region.update_layout(
-            yaxis={'categoryorder': 'total ascending'},
-            coloraxis_showscale=False
-        )
-        # Formatear hover a moneda $,.2f
-        fig_region.update_traces(
-            hovertemplate="<b>%{y}</b><br>Ventas: $%{x:,.2f}"
-        )
-        st.plotly_chart(fig_region, use_container_width=True)
-
-    with row2_right:
-        # Gráfico de Barras: Top 5 de productos más vendidos en el periodo seleccionado
-        product_grouped = filtered_sales.groupby('producto')['ventas'].sum().reset_index()
-        top_products = product_grouped.sort_values('ventas', ascending=False).head(5)
-
-        fig_bar = px.bar(
-            top_products,
-            x='ventas',
-            y='producto',
-            orientation='h',
-            labels={'ventas': 'Ventas Totales ($)', 'producto': 'Producto'},
-            title='Top 5 Productos más Vendidos',
-            color='ventas',
-            color_continuous_scale='blues'
-        )
-        fig_bar.update_layout(
-            yaxis={'categoryorder': 'total ascending'},
-            coloraxis_showscale=False
-        )
-        # Formatear hover a moneda $,.2f
-        fig_bar.update_traces(
-            hovertemplate="<b>%{y}</b><br>Ventas: $%{x:,.2f}"
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    st.markdown("---")
-
-    row3_left, row3_right = st.columns(2)
-
-    with row3_left:
-        # Gráfico de Barras: Desempeño de Promociones (Con vs Sin Promoción)
-        promo_df = filtered_sales.copy()
-        promo_df['Con Promoción'] = promo_df['promocion_id'].apply(
-            lambda x: "Con Promoción" if pd.notna(x) and x != "" and str(x).lower() != "none" and x != 0 else "Sin Promoción"
-        )
-        promo_grouped = promo_df.groupby('Con Promoción')['ventas'].sum().reset_index()
-
-        fig_promo = px.bar(
-            promo_grouped,
-            x='Con Promoción',
-            y='ventas',
-            labels={'ventas': 'Ventas Totales ($)', 'Con Promoción': 'Estado Promocional'},
-            title='Desempeño de Ventas: Con vs. Sin Promoción',
-            color='Con Promoción',
-            color_discrete_map={"Con Promoción": "#1f77b4", "Sin Promoción": "#ff7f0e"}
-        )
-        # Formatear hover a moneda $,.2f
-        fig_promo.update_traces(
-            hovertemplate="<b>%{x}</b><br>Ventas: $%{y:,.2f}"
-        )
-        st.plotly_chart(fig_promo, use_container_width=True)
-
-    with row3_right:
-        # Mostrar resumen tabular de transacciones filtradas para llenar la cuadrícula elegantemente
-        st.subheader("Resumen de Métricas del Periodo")
-        st.write("A continuación se muestra el desglose del rendimiento del periodo seleccionado para auditoría:")
-
-        metrics_df = pd.DataFrame({
-            "Métrica": ["Ventas Totales", "Transacciones", "Ticket Promedio", "Descuentos Totales"],
-            "Valor": [format_currency_full(total_sales), format_number(total_transactions), format_currency_full(avg_ticket), format_currency_full(total_discounts)]
-        })
-        st.dataframe(metrics_df, hide_index=True, use_container_width=True)
