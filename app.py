@@ -660,33 +660,204 @@ with tab_copilot:
 
 # ==================== PESTAÑA 3: SIMULACIONES WHAT-IF ====================
 with tab_whatif:
-    st.header("🔮 Simulaciones de Escenarios What-If")
-    st.write("Ajusta las variables de negocio para proyectar de manera instantánea el impacto en las ventas totales:")
+    st.header("🔮 Simulaciones de Escenarios What-If & Monte Carlo")
 
-    # Sliders Interactivos
-    incremento_precio = st.slider("Incremento en Precio Unitario (%)", -20.0, 50.0, 0.0, 1.0)
-    incremento_volumen = st.slider("Incremento en Volumen de Transacciones (%)", -20.0, 100.0, 0.0, 1.0)
-    descuento_promedio = st.slider("Descuento Promedio Aplicado (%)", 0.0, 50.0, 5.0, 0.5)
+    # Organizar en sub-secciones
+    subtab_proyecciones, subtab_montecarlo = st.tabs([
+        "📈 Proyecciones de Negocio Simples",
+        "🎲 Simulación de Monte Carlo"
+    ])
 
-    # Calcular Proyecciones
-    current_sales = df_sales['ventas'].sum() if not df_sales.empty else 0.0
-    factor_precio = 1 + (incremento_precio / 100.0)
-    factor_volumen = 1 + (incremento_volumen / 100.0)
-    # Suponiendo que el descuento por defecto en las ventas actuales es del 5% aproximadamente, proyectamos la diferencia
-    factor_descuento = 1 - (descuento_promedio / 100.0)
+    with subtab_proyecciones:
+        st.subheader("Simulación de Escenarios Deterministas")
+        st.write("Ajusta las variables de negocio para proyectar de manera instantánea el impacto en las ventas totales:")
 
-    projected_sales = current_sales * factor_precio * factor_volumen * (factor_descuento / 0.95)
+        # Sliders Interactivos
+        incremento_precio = st.slider("Incremento en Precio Unitario (%)", -20.0, 50.0, 0.0, 1.0, key="wi_precio")
+        incremento_volumen = st.slider("Incremento en Volumen de Transacciones (%)", -20.0, 100.0, 0.0, 1.0, key="wi_volumen")
+        descuento_promedio = st.slider("Descuento Promedio Aplicado (%)", 0.0, 50.0, 5.0, 0.5, key="wi_descuento")
 
-    st.markdown("### Proyección de Resultados de Negocio")
-    col_cur, col_proj, col_diff = st.columns(3)
-    with col_cur:
-        st.metric("Ventas Actuales", format_currency_short(current_sales))
-    with col_proj:
-        st.metric("Ventas Proyectadas", format_currency_short(projected_sales))
-    with col_diff:
-        cambio = projected_sales - current_sales
-        st.metric(
-            "Variación Estimada",
-            format_currency_short(cambio),
-            delta=f"{((projected_sales - current_sales) / current_sales * 100):+.1f}%" if current_sales > 0 else "0.0%"
+        # Calcular Proyecciones
+        current_sales = df_sales['ventas'].sum() if not df_sales.empty else 0.0
+        factor_precio = 1 + (incremento_precio / 100.0)
+        factor_volumen = 1 + (incremento_volumen / 100.0)
+        factor_descuento = 1 - (descuento_promedio / 100.0)
+
+        projected_sales = current_sales * factor_precio * factor_volumen * (factor_descuento / 0.95)
+
+        st.markdown("### Proyección de Resultados de Negocio")
+        col_cur, col_proj, col_diff = st.columns(3)
+        with col_cur:
+            st.metric("Ventas Actuales", format_currency_short(current_sales))
+        with col_proj:
+            st.metric("Ventas Proyectadas", format_currency_short(projected_sales))
+        with col_diff:
+            cambio = projected_sales - current_sales
+            st.metric(
+                "Variación Estimada",
+                format_currency_short(cambio),
+                delta=f"{((projected_sales - current_sales) / current_sales * 100):+.1f}%" if current_sales > 0 else "0.0%"
+            )
+
+    with subtab_montecarlo:
+        st.subheader("🎲 Simulación de Monte Carlo & Análisis Decisional")
+        st.write("Simula miles de escenarios de ventas posibles utilizando un modelo probabilístico normal (Campana de Gauss) para analizar riesgos y viabilidad.")
+
+        # 1. Obtención de parámetros históricos (media y desviación estándar)
+        sales_data = filtered_sales['ventas'] if not filtered_sales.empty else df_sales['ventas']
+
+        # Calcular media y desviación estándar de transacciones individuales
+        media_historica = float(sales_data.mean()) if len(sales_data) > 0 else 1000.0
+        desviacion_historica = float(sales_data.std()) if len(sales_data) > 1 else 200.0
+
+        # Ofrecer controles interactivos al usuario
+        col_ctrl1, col_ctrl2 = st.columns(2)
+        with col_ctrl1:
+            n_simulaciones = st.slider(
+                "Número de Simulaciones (N)",
+                min_value=1000,
+                max_value=10000,
+                value=5000,
+                step=500,
+                help="Número de escenarios aleatorios a generar."
+            )
+            factor_volatilidad = st.slider(
+                "Factor de Volatilidad (Multiplicador de σ)",
+                min_value=0.1,
+                max_value=3.0,
+                value=1.0,
+                step=0.1,
+                help="Aumenta o disminuye la incertidumbre de la simulación."
+            )
+        with col_ctrl2:
+            meta_ventas = st.number_input(
+                "Meta de Venta por Transacción ($)",
+                min_value=1.0,
+                value=float(round(media_historica * 1.05, 2)),
+                step=10.0,
+                help="Meta financiera individual que se desea alcanzar o superar."
+            )
+
+        # 2. Generación de la Simulación Monte Carlo (Numpy)
+        # Asegurar semilla aleatoria reproducible
+        np.random.seed(42)
+        desviacion_ajustada = desviacion_historica * factor_volatilidad
+        simulated_values = np.random.normal(loc=media_historica, scale=desviacion_ajustada, size=n_simulaciones)
+
+        # 3. Métricas Estadísticas del Escenario
+        p5_pesimista = np.percentile(simulated_values, 5)
+        p95_optimista = np.percentile(simulated_values, 95)
+        esperado_media = np.mean(simulated_values)
+
+        prob_superar_meta = (simulated_values > meta_ventas).sum() / n_simulaciones * 100.0
+
+        st.markdown("### Métricas de Escenarios Probabilísticos")
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        with m_col1:
+            st.metric(
+                label="🔴 Escenario Pesimista (P5)",
+                value=format_currency_full(p5_pesimista),
+                help="Existe solo un 5% de probabilidad de que las ventas estén por debajo de este valor."
+            )
+        with m_col2:
+            st.metric(
+                label="🔵 Escenario Esperado (Media)",
+                value=format_currency_full(esperado_media),
+                help="El promedio matemático de todos los escenarios simulados."
+            )
+        with m_col3:
+            st.metric(
+                label="🟢 Escenario Optimista (P95)",
+                value=format_currency_full(p95_optimista),
+                help="Existe un 95% de probabilidad de que las ventas estén por debajo de este valor (o 5% de que lo superen)."
+            )
+        with m_col4:
+            st.metric(
+                label="🎯 Probabilidad de Superar Meta",
+                value=f"{prob_superar_meta:.2f}%",
+                help=f"Porcentaje de escenarios simulados en los que la venta supera ${meta_ventas:,.2f}"
+            )
+
+        # 4. Visualización Gráfica con Curva de Gauss (Plotly)
+        import plotly.graph_objects as go
+
+        # Crear histograma
+        fig_mc = go.Figure()
+
+        # Histograma con densidad relativa
+        fig_mc.add_trace(go.Histogram(
+            x=simulated_values,
+            histnorm='probability density',
+            name='Frecuencia Simulada',
+            marker_color='rgba(100, 149, 237, 0.6)',
+            nbinsx=50,
+            hovertemplate="Rango: %{x}<br>Densidad: %{y:,.5f}<extra></extra>"
+        ))
+
+        # Curva de densidad teórica (Campana de Gauss)
+        xmin, xmax = float(np.min(simulated_values)), float(np.max(simulated_values))
+        x_axis = np.linspace(xmin, xmax, 100)
+        # Fórmula de densidad normal
+        y_axis = (1 / (desviacion_ajustada * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_axis - media_historica) / desviacion_ajustada) ** 2)
+
+        fig_mc.add_trace(go.Scatter(
+            x=x_axis,
+            y=y_axis,
+            mode='lines',
+            name='Curva Normal Teórica',
+            line=dict(color='orange', width=3),
+            hovertemplate="Venta: $%{x:,.2f}<br>Densidad: %{y:,.5f}<extra></extra>"
+        ))
+
+        # Líneas verticales para los escenarios clave
+        # Pesimista P5
+        fig_mc.add_vline(x=p5_pesimista, line_width=2, line_dash="dash", line_color="red",
+                         annotation_text="P5 (Pesimista)", annotation_position="top left")
+        # Media Esperada
+        fig_mc.add_vline(x=esperado_media, line_width=2, line_dash="dash", line_color="blue",
+                         annotation_text="Media (Esperado)", annotation_position="top left")
+        # Optimista P95
+        fig_mc.add_vline(x=p95_optimista, line_width=2, line_dash="dash", line_color="green",
+                         annotation_text="P95 (Optimista)", annotation_position="top right")
+        # Meta de Ventas
+        fig_mc.add_vline(x=meta_ventas, line_width=2.5, line_color="purple",
+                         annotation_text="Meta", annotation_position="bottom right")
+
+        fig_mc.update_layout(
+            title="Distribución de Ventas Simuladas (Monte Carlo)",
+            xaxis_title="Ventas ($)",
+            yaxis_title="Densidad de Probabilidad",
+            hovermode="closest",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
+
+        st.plotly_chart(fig_mc, use_container_width=True)
+
+        # 5. Resumen de Toma de Decisiones Decisionales
+        st.markdown("### 📋 Análisis Decisional de Viabilidad")
+
+        # Evaluación heurística de viabilidad
+        if prob_superar_meta >= 70.0:
+            st.success(
+                f"🟢 **Viabilidad Financiera: ALTA ({prob_superar_meta:.1f}%)**\n\n"
+                f"La probabilidad de superar la meta de **${meta_ventas:,.2f}** es muy alta. "
+                "Bajo las condiciones actuales de volatilidad y precio, el negocio se encuentra en una zona de confort financiero "
+                "donde la mayoría de las transacciones son altamente rentables. Recomendación: Mantener la estrategia comercial e "
+                "invertir excedentes en expansión de canales."
+            )
+        elif prob_superar_meta >= 40.0:
+            st.info(
+                f"🟡 **Viabilidad Financiera: MODERADA / ESTABLE ({prob_superar_meta:.1f}%)**\n\n"
+                f"Existe una probabilidad intermedia de alcanzar o superar la meta de **${meta_ventas:,.2f}**. "
+                "El negocio se mantiene balanceado pero expuesto a la volatilidad comercial. "
+                "Cualquier incremento en costos operativos o variaciones negativas en el mercado podría comprometer el margen de ganancias. "
+                "Recomendación: Implementar campañas promocionales selectivas para impulsar el ticket promedio y mitigar riesgos."
+            )
+        else:
+            st.warning(
+                f"🔴 **Viabilidad Financiera: ALTO RIESGO / BAJA ({prob_superar_meta:.1f}%)**\n\n"
+                f"La probabilidad de superar la meta de **${meta_ventas:,.2f}** es baja. "
+                "El escenario simulado revela que las fluctuaciones normales y la volatilidad actual ponen en riesgo el logro de los objetivos financieros. "
+                "Recomendación: Es prioritario revisar la estructura de precios unitarios o reducir la variabilidad del proceso (volatilidad) "
+                "mediante controles de calidad o rediseño de canales de venta para evitar pérdidas."
+            )
