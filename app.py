@@ -309,12 +309,12 @@ with tab_dashboard:
             # Gráfico de Líneas: Tendencia de ventas mensual vs. Presupuesto (Budget)
             sales_monthly = filtered_sales.copy()
             sales_monthly['Mes'] = sales_monthly['fecha'].dt.strftime('%Y-%m')
-            sales_grouped = sales_monthly.groupby('Mes')['ventas'].sum().reset_index()
+            sales_grouped = sales_monthly['ventas'].groupby(sales_monthly['Mes']).sum().reset_index()
 
             if not filtered_budget.empty:
                 budget_monthly = filtered_budget.copy()
                 budget_monthly['Mes'] = budget_monthly['fecha'].dt.strftime('%Y-%m')
-                budget_grouped = budget_monthly.groupby('Mes')['presupuesto'].sum().reset_index()
+                budget_grouped = budget_monthly['presupuesto'].groupby(budget_monthly['Mes']).sum().reset_index()
             else:
                 budget_grouped = pd.DataFrame(columns=['Mes', 'presupuesto'])
 
@@ -611,8 +611,11 @@ with tab_copilot:
                 # Flujo de ejecución Text-to-SQL y conversión de respuesta de Supabase RPC run_sql a DataFrame de Pandas
                 with st.spinner("Ejecutando consulta en PostgreSQL..."):
                     try:
+                        # Limpiar el query para evitar errores de sintaxis en subconsultas
+                        sql_query_clean = sql.strip().rstrip(";")
+
                         # Ejecutar la función RPC en Supabase
-                        response = client.rpc("run_sql", {"query": sql}).execute()
+                        response = client.rpc("run_sql", {"query": sql_query_clean}).execute()
                         data = response.data
 
                         # Si data viene como string (JSON en texto), lo parseamos
@@ -623,34 +626,34 @@ with tab_copilot:
                         # Validar si hubo un error retornado por la función SQL
                         if isinstance(data, dict) and "error" in data:
                             st.error(f"Error en la consulta SQL: {data['error']}")
-                            register_chat_history(prompt, sql, f"Error SQL: {data['error']}")
+                            register_chat_history(prompt, sql_query_clean, f"Error SQL: {data['error']}")
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "content": f"{explanation}\n\n❌ Error en la consulta SQL: {data['error']}",
-                                "sql": sql
+                                "sql": sql_query_clean
                             })
                         else:
-                            # Si data es un diccionario único (p. ej. escalar o registro único), lo envolvemos en una lista
+                            # Si data es un diccionario único (p. ej. escalar o registro único), lo envolvedmos en una lista
                             if isinstance(data, dict):
                                 data = [data]
 
                             if data:
                                 df_result = pd.DataFrame(data)
                                 st.dataframe(df_result, use_container_width=True)
-                                register_chat_history(prompt, sql, "Exitoso")
+                                register_chat_history(prompt, sql_query_clean, "Exitoso")
                                 st.session_state.messages.append({
                                     "role": "assistant",
                                     "content": explanation,
-                                    "sql": sql,
+                                    "sql": sql_query_clean,
                                     "df_result": df_result
                                 })
                             else:
                                 st.info("La consulta no devolvió resultados.")
-                                register_chat_history(prompt, sql, "Sin resultados")
+                                register_chat_history(prompt, sql_query_clean, "Sin resultados")
                                 st.session_state.messages.append({
                                     "role": "assistant",
                                     "content": f"{explanation}\n\n*La consulta no devolvió resultados.*",
-                                    "sql": sql
+                                    "sql": sql_query_clean
                                 })
                     except Exception as e:
                         st.error(f"Error al ejecutar la consulta SQL: {e}")
