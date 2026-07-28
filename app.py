@@ -564,20 +564,7 @@ with tab_copilot:
         except Exception as e:
             raise Exception(f"Error al generar SQL mediante el LLM: {e}")
 
-    # 3. Función para Ejecutar Raw SQL de forma segura en Supabase usando RPC comunes
-    def run_raw_sql(client, sql):
-        last_error = None
-        # Probar con los diferentes nombres comunes de funciones RPC de Postgres en Supabase
-        for fn_name, param_name in [("ejecutar_sql", "query_sql"), ("exec_sql", "query_text"), ("run_sql", "query")]:
-            try:
-                res = client.rpc(fn_name, {param_name: sql}).execute()
-                if res.data is not None:
-                    return pd.DataFrame(res.data)
-            except Exception as e:
-                last_error = e
-        raise Exception(f"Error al ejecutar consulta SQL en Supabase: {last_error or 'RPC no configurado'}")
-
-    # 4. Registrar en la tabla historial_chat
+    # Registrar en la tabla historial_chat
     def register_chat_history(pregunta, sql_generado, estado):
         try:
             client.table("historial_chat").insert({
@@ -600,7 +587,7 @@ with tab_copilot:
                 with st.expander("Ver consulta SQL generada"):
                     st.code(msg["sql"], language="sql")
             if "df_result" in msg and msg["df_result"] is not None:
-                st.dataframe(msg["df_result"])
+                st.dataframe(msg["df_result"], use_container_width=True)
 
     # Entrada de Chat
     if prompt := st.chat_input("Escribe tu pregunta sobre las ventas..."):
@@ -621,31 +608,61 @@ with tab_copilot:
                 with st.expander("Ver consulta SQL generada"):
                     st.code(sql, language="sql")
 
-                # Flujo: Ejecutar SQL -> DataFrame
+                # Flujo de ejecución Text-to-SQL y conversión de respuesta de Supabase RPC run_sql a DataFrame de Pandas
                 with st.spinner("Ejecutando consulta en PostgreSQL..."):
-                    df_result = run_raw_sql(client, sql)
+                    try:
+                        # Ejecutar la función RPC en Supabase
+                        response = client.rpc("run_sql", {"query": sql}).execute()
+                        data = response.data
 
-                if df_result is not None and not df_result.empty:
-                    st.dataframe(df_result)
-                    register_chat_history(prompt, sql, "Exitoso")
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": explanation,
-                        "sql": sql,
-                        "df_result": df_result
-                    })
-                else:
-                    st.info("La consulta se ejecutó exitosamente pero no devolvió ningún registro.")
-                    register_chat_history(prompt, sql, "Sin resultados")
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": f"{explanation}\n\n*La consulta se ejecutó exitosamente pero no devolvió ningún registro.*",
-                        "sql": sql
-                    })
+                        # Si data viene como string (JSON en texto), lo parseamos
+                        if isinstance(data, str):
+                            import json
+                            data = json.loads(data)
+
+                        # Validar si hubo un error retornado por la función SQL
+                        if isinstance(data, dict) and "error" in data:
+                            st.error(f"Error en la consulta SQL: {data['error']}")
+                            register_chat_history(prompt, sql, f"Error SQL: {data['error']}")
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": f"{explanation}\n\n❌ Error en la consulta SQL: {data['error']}",
+                                "sql": sql
+                            })
+                        else:
+                            # Si data es un diccionario único (p. ej. escalar o registro único), lo envolvemos en una lista
+                            if isinstance(data, dict):
+                                data = [data]
+
+                            if data:
+                                df_result = pd.DataFrame(data)
+                                st.dataframe(df_result, use_container_width=True)
+                                register_chat_history(prompt, sql, "Exitoso")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": explanation,
+                                    "sql": sql,
+                                    "df_result": df_result
+                                })
+                            else:
+                                st.info("La consulta no devolvió resultados.")
+                                register_chat_history(prompt, sql, "Sin resultados")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": f"{explanation}\n\n*La consulta no devolvió resultados.*",
+                                    "sql": sql
+                                })
+                    except Exception as e:
+                        st.error(f"Error al ejecutar la consulta SQL: {e}")
+                        register_chat_history(prompt, sql, f"Error de Conexión: {e}")
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Lo siento, ocurrió un problema al ejecutar la consulta SQL: {e}",
+                            "sql": sql
+                        })
             except Exception as e:
-                # Captura amigable de errores en la ejecución del SQL
-                st.error(f"❌ **Error durante la ejecución**: {e}")
-                register_chat_history(prompt, "", f"Fallido: {e}")
+                st.error(f"❌ **Error durante la generación**: {e}")
+                register_chat_history(prompt, "", f"Generación Fallida: {e}")
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": f"Lo siento, ocurrió un problema al procesar tu solicitud: {e}"
