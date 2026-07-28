@@ -88,8 +88,7 @@ def flatten_sales(data):
             "fecha": row.get("fecha"),
             "cantidad": row.get("cantidad"),
             "precio_unitario_venta": row.get("precio_unitario_venta"),
-            # Forzar conversión de descuento_aplicado a numérico
-            "descuento": float(row.get("descuento_aplicado") or 0.0),
+            "descuento_aplicado": row.get("descuento_aplicado"),
             "ventas": float(row.get("monto_total") or 0.0),
             "region_id": row.get("region_id"),
             "canal_id": row.get("canal_id"),
@@ -133,7 +132,7 @@ def load_all_data():
     df_sales = None
     df_budget = None
 
-    # Consulta Principal de Ventas (incluyendo promocion_id)
+    # Consulta Principal de Ventas (incluyendo descuento_aplicado y promocion_id)
     try:
         sales_resp = client.table("ventas").select(
             "id, fecha, cantidad, precio_unitario_venta, descuento_aplicado, monto_total, "
@@ -162,6 +161,9 @@ def load_all_data():
     if df_sales is None or df_sales.empty:
         st.error("❌ **Error de Datos**: No se pudieron obtener registros válidos de la tabla 'ventas'.")
         st.stop()
+
+    # Conversión explícita y segura a numérico de descuento_aplicado rellenando nulos con cero
+    df_sales['descuento_aplicado'] = pd.to_numeric(df_sales['descuento_aplicado'], errors='coerce').fillna(0)
 
     if df_budget is None:
         df_budget = pd.DataFrame(columns=["id", "fecha", "presupuesto", "canal_id", "region_id"])
@@ -244,7 +246,7 @@ def format_currency_short(value):
     if value >= 1_000_000:
         return f"${value / 1_000_000:,.2f}M"
     elif value >= 1_000:
-        return f"${value / 1_000:,.1f}K"
+        return f"${value / 1_000:,.2f}K"
     else:
         return f"${value:,.2f}"
 
@@ -273,10 +275,10 @@ else:
     total_sales = filtered_sales['ventas'].sum()
     total_transactions = len(filtered_sales)
     avg_ticket = filtered_sales['ventas'].mean() if total_transactions > 0 else 0
-    # Asegurando suma del descuento correctamente convertido a float
-    total_discounts = filtered_sales['descuento'].sum()
+    # Asegurando suma del descuento_aplicado correctamente convertido a float
+    total_discounts = filtered_sales['descuento_aplicado'].sum()
 
-    # Mostrar Tarjetas de KPIs con st.metric (Abreviando ventas totales)
+    # Mostrar Tarjetas de KPIs con st.metric
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Ventas Totales", format_currency_short(total_sales), help=format_currency_full(total_sales))
@@ -285,7 +287,7 @@ else:
     with col3:
         st.metric("Ticket Promedio", format_currency_full(avg_ticket))
     with col4:
-        st.metric("Descuentos Aplicados", format_currency_full(total_discounts))
+        st.metric("Descuentos Aplicados", format_currency_short(total_discounts), help=format_currency_full(total_discounts))
 
     st.markdown("---")
 
