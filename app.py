@@ -5,6 +5,7 @@ import plotly.express as px
 import requests
 import json
 import os
+import google.generativeai as genai
 from supabase import create_client, Client
 
 # Configuración de la página de Streamlit
@@ -471,19 +472,7 @@ with tab_copilot:
             st.sidebar.warning(f"No se pudieron cargar los metadatos del esquema: {e}")
         return "Esquema relacional estándar: tablas 'ventas', 'productos', 'regiones', 'canales', 'presupuestos'"
 
-    # 2. Funciones de Llamada Directa a LLM (Gemini / OpenAI) sin dependencias complejas
-    def call_gemini_api(prompt, system_prompt, api_key):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "generationConfig": {"temperature": 0.0}
-        }
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-
+    # 2. Funciones de Llamada Directa a LLM (Gemini / OpenAI)
     def call_openai_api(prompt, system_prompt, api_key):
         url = "https://api.openai.com/v1/chat/completions"
         headers = {
@@ -525,7 +514,15 @@ with tab_copilot:
         """
 
         if gemini_key:
-            response_text = call_gemini_api(prompt, system_prompt, gemini_key)
+            genai.configure(api_key=gemini_key)
+            try:
+                model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=system_prompt)
+                response = model.generate_content(prompt)
+            except TypeError:
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                full_prompt = f"{system_prompt}\n\nPregunta del usuario:\n{prompt}"
+                response = model.generate_content(full_prompt)
+            response_text = response.text
         else:
             response_text = call_openai_api(prompt, system_prompt, openai_key)
 
