@@ -523,7 +523,7 @@ with tab_copilot:
             }
             try:
                 response = client_gemini.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=prompt,
                     config=config
                 )
@@ -531,7 +531,7 @@ with tab_copilot:
                 # Fallback si por alguna razón falla el config object directo
                 full_prompt = f"{system_prompt}\n\nPregunta del usuario:\n{prompt}"
                 response = client_gemini.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=full_prompt
                 )
             response_text = response.text
