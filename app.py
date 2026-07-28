@@ -5,7 +5,7 @@ import plotly.express as px
 import requests
 import json
 import os
-import google.generativeai as genai
+from google import genai
 from supabase import create_client, Client
 
 # Configuración de la página de Streamlit
@@ -514,14 +514,26 @@ with tab_copilot:
         """
 
         if gemini_key:
-            genai.configure(api_key=gemini_key)
+            client_gemini = genai.Client(api_key=gemini_key)
+            # En la API oficial moderna genai.Client, las instrucciones del sistema se pasan como config.
+            # Sin embargo, para mayor robustez ante diferentes versiones/configuraciones, se añade también en el contexto del prompt.
+            config = {
+                "system_instruction": system_prompt,
+                "temperature": 0.0
+            }
             try:
-                model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=system_prompt)
-                response = model.generate_content(prompt)
-            except TypeError:
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                response = client_gemini.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=config
+                )
+            except Exception:
+                # Fallback si por alguna razón falla el config object directo
                 full_prompt = f"{system_prompt}\n\nPregunta del usuario:\n{prompt}"
-                response = model.generate_content(full_prompt)
+                response = client_gemini.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=full_prompt
+                )
             response_text = response.text
         else:
             response_text = call_openai_api(prompt, system_prompt, openai_key)
