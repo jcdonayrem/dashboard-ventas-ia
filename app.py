@@ -713,20 +713,26 @@ with tab_whatif:
         # Ofrecer controles interactivos al usuario
         col_ctrl1, col_ctrl2 = st.columns(2)
         with col_ctrl1:
-            n_simulaciones = st.select_slider(
+            n_simulaciones = st.radio(
                 "Número de Simulaciones",
                 options=[1000, 5000, 10000],
-                value=5000,
+                index=1,
+                horizontal=True,
                 help="Número de escenarios aleatorios a generar."
             )
-            volatilidad_pct = st.slider(
-                "Incertidumbre / Volatilidad Esperada (%)",
-                min_value=5.0,
-                max_value=50.0,
-                value=15.0,
-                step=1.0,
+            volatilidad_selected = st.selectbox(
+                "Incertidumbre / Volatilidad Esperada",
+                options=['10% (Baja)', '15% (Moderada)', '25% (Alta)', '40% (Crítica)'],
+                index=1,
                 help="Ajusta la incertidumbre de la simulación comercial."
             )
+            volatilidad_map = {
+                '10% (Baja)': 10.0,
+                '15% (Moderada)': 15.0,
+                '25% (Alta)': 25.0,
+                '40% (Crítica)': 40.0
+            }
+            volatilidad_pct = volatilidad_map[volatilidad_selected]
         with col_ctrl2:
             meta_ventas = st.number_input(
                 "Meta de Ingresos Totales ($)",
