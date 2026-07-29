@@ -713,36 +713,34 @@ with tab_whatif:
         # Ofrecer controles interactivos al usuario
         col_ctrl1, col_ctrl2 = st.columns(2)
         with col_ctrl1:
-            n_simulaciones = st.slider(
-                "Número de Simulaciones (N)",
-                min_value=1000,
-                max_value=10000,
+            n_simulaciones = st.select_slider(
+                "Número de Simulaciones",
+                options=[1000, 5000, 10000],
                 value=5000,
-                step=500,
                 help="Número de escenarios aleatorios a generar."
             )
-            factor_volatilidad = st.slider(
-                "Factor de Volatilidad (Multiplicador de σ)",
-                min_value=0.1,
-                max_value=3.0,
-                value=1.0,
-                step=0.1,
-                help="Aumenta o disminuye la incertidumbre de la simulación."
+            volatilidad_pct = st.slider(
+                "Incertidumbre / Volatilidad Esperada (%)",
+                min_value=5.0,
+                max_value=50.0,
+                value=15.0,
+                step=1.0,
+                help="Ajusta la incertidumbre de la simulación comercial."
             )
         with col_ctrl2:
             meta_ventas = st.number_input(
-                "Meta de Venta por Transacción ($)",
+                "Meta de Ingresos Totales ($)",
                 min_value=1.0,
                 value=float(round(media_historica * 1.05, 2)),
-                step=10.0,
-                help="Meta financiera individual que se desea alcanzar o superar."
+                step=1000.0,
+                help="Meta financiera general que se desea alcanzar o superar."
             )
 
         # 2. Generación de la Simulación Monte Carlo (Numpy)
         # Asegurar semilla aleatoria reproducible
         np.random.seed(42)
-        desviacion_ajustada = desviacion_historica * factor_volatilidad
-        simulated_values = np.random.normal(loc=media_historica, scale=desviacion_ajustada, size=n_simulaciones)
+        sigma_simulada = media_historica * (volatilidad_pct / 100.0)
+        simulated_values = np.random.normal(loc=media_historica, scale=sigma_simulada, size=n_simulaciones)
 
         # 3. Métricas Estadísticas del Escenario
         p5_pesimista = np.percentile(simulated_values, 5)
@@ -798,7 +796,7 @@ with tab_whatif:
         xmin, xmax = float(np.min(simulated_values)), float(np.max(simulated_values))
         x_axis = np.linspace(xmin, xmax, 100)
         # Fórmula de densidad normal
-        y_axis = (1 / (desviacion_ajustada * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_axis - media_historica) / desviacion_ajustada) ** 2)
+        y_axis = (1 / (sigma_simulada * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_axis - media_historica) / sigma_simulada) ** 2)
 
         fig_mc.add_trace(go.Scatter(
             x=x_axis,
